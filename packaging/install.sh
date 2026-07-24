@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install dymo-bridge for SkyKeeper on Linux (Pop!_OS / Cosmic / Ubuntu).
-# Replaces DYMO Connect Web Service on https://127.0.0.1:41951
+# SkyKeeper Print Helper on https://127.0.0.1:41971 (DYMO Connect may use 41951)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

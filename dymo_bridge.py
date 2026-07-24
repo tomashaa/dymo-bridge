@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-dymo-bridge — a Linux-compatible clone of the DYMO Connect Web Service.
+dymo-bridge — SkyKeeper Print Helper (Linux).
 
-Reimplements just the three endpoints the SkyKeeper MRO app calls against
-DYMO Connect on https://127.0.0.1:41951:
+Emulates the DYMO Connect Web Service API on a dedicated port so SkyKeeper can
+prefer this helper and fall back to official DYMO Connect (41951–41960):
 
+    GET  /DYMO/DLS/Version                   -> "SkyKeeper-Print-Helper/…"
     GET  /DYMO/DLS/Printing/StatusConnected  -> "true"
     GET  /DYMO/DLS/Printing/GetPrinters      -> <Printers> XML built from CUPS
-    POST /DYMO/DLS/Printing/PrintLabel        -> renders labelXml and prints via CUPS
+    POST /DYMO/DLS/Printing/PrintLabel[2]    -> renders labelXml and prints via CUPS
+
+Default listen: https://127.0.0.1:41971  (override with DYMO_BRIDGE_PORT)
 
 It renders both DYMO XML dialects the app emits:
   * DYMO Label Framework v8  (<DieCutLabel>/<ContinuousLabel>, twips) — TextObject,
@@ -48,7 +51,9 @@ except ImportError:
 # --------------------------------------------------------------------------- #
 
 HOST = "127.0.0.1"
-PORT = 41951
+# Dedicated SkyKeeper port — leave 41951–41960 for official DYMO Connect fallback.
+PORT = int(os.environ.get("DYMO_BRIDGE_PORT", "41971"))
+SERVICE_VERSION = "SkyKeeper-Print-Helper/1.0"
 DPI = 300
 TWIPS_PER_INCH = 1440.0
 MM_PER_INCH = 25.4
@@ -563,17 +568,17 @@ def ensure_cert():
 # --------------------------------------------------------------------------- #
 
 STATUS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
-<title>dymo-bridge</title></head><body style="font-family:sans-serif;max-width:40em;margin:3em auto">
-<h2>✅ dymo-bridge is running</h2>
-<p>Linux clone of the DYMO Connect Web Service for SkyKeeper.</p>
-<p>If you reached this page, the self-signed certificate is now trusted for this browser —
-label printing from the app should work.</p>
+<title>SkyKeeper Print Helper</title></head><body style="font-family:sans-serif;max-width:40em;margin:3em auto">
+<h2>SkyKeeper Print Helper is running</h2>
+<p>Local label print service for SkyKeeper (port {port}). Official DYMO Connect can still run on 41951 as fallback.</p>
+<p>If you reached this page, the self-signed certificate is trusted for this browser — label printing from the app should work.</p>
+<p>Version: <b>{version}</b></p>
 <p>Printers detected: <b>{printers}</b></p>
 </body></html>"""
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "dymo-bridge/1.0"
+    server_version = "SkyKeeper-Print-Helper/1.0"
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -605,10 +610,18 @@ class Handler(BaseHTTPRequestHandler):
             self._send("true")
         elif path.endswith("/GetPrinters"):
             self._send(build_printers_xml(), ctype="text/xml; charset=utf-8")
+        elif path.endswith("/Version"):
+            self._send(SERVICE_VERSION)
         elif path in ("", "/"):
             names = ", ".join(p["name"] for p in list_dymo_printers()) or "none"
-            self._send(STATUS_PAGE.format(printers=html.escape(names)),
-                       ctype="text/html; charset=utf-8")
+            self._send(
+                STATUS_PAGE.format(
+                    printers=html.escape(names),
+                    port=PORT,
+                    version=html.escape(SERVICE_VERSION),
+                ),
+                ctype="text/html; charset=utf-8",
+            )
         else:
             self._send("true")  # be permissive for other status probes
 
