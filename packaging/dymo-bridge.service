@@ -1,9 +1,11 @@
 [Unit]
-Description=dymo-bridge (Linux DYMO Connect Web Service clone for SkyKeeper)
+Description=SkyKeeper Print Helper (dymo-bridge)
 After=cups.service network-online.target
 
 [Service]
 Type=simple
+# install.sh regenerates this unit with absolute ExecStart/WorkingDirectory.
+Environment=DYMO_BRIDGE_PORT=41971
 ExecStart=/usr/bin/python3 %h/.local/share/dymo-bridge/dymo_bridge.py
 Restart=on-failure
 RestartSec=3

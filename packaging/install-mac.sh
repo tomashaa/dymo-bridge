@@ -26,12 +26,8 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-PY="$(command -v python3)"
-echo "==> Using Python: $PY"
-
-echo "==> Installing Python packages (pillow, qrcode, cryptography)…"
-"$PY" -m pip install --user --upgrade pip >/dev/null 2>&1 || true
-"$PY" -m pip install --user "pillow" "qrcode[pil]" "cryptography"
+SYS_PY="$(command -v python3)"
+echo "==> Using Python: $SYS_PY"
 
 echo "==> Installing bridge files → $DEST"
 mkdir -p "$DEST"
@@ -40,11 +36,28 @@ if [[ -f "$ROOT/test-print.py" ]]; then
   install -m 0644 "$ROOT/test-print.py" "$DEST/test-print.py"
 fi
 
+# venv avoids PEP 668 / externally-managed-environment on Homebrew Python
+VENV="$DEST/venv"
+echo "==> Creating venv and installing pillow, qrcode, cryptography…"
+if [[ ! -x "$VENV/bin/python" ]]; then
+  "$SYS_PY" -m venv "$VENV"
+fi
+"$VENV/bin/pip" install --upgrade pip >/dev/null
+"$VENV/bin/pip" install "pillow" "qrcode[pil]" "cryptography"
+PY="$VENV/bin/python"
+
 echo "==> Writing LaunchAgent $PLIST_LABEL (login autostart)…"
 mkdir -p "$PLIST_DIR"
-# Unload previous if present
 launchctl bootout "gui/$(id -u)/${PLIST_LABEL}" 2>/dev/null || true
 launchctl unload "$PLIST" 2>/dev/null || true
+
+# Escape nothing special for XML beyond & < — paths are under $HOME
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+PY_XML="$(xml_escape "$PY")"
+DEST_XML="$(xml_escape "$DEST")"
+SCRIPT_XML="$(xml_escape "$DEST/dymo_bridge.py")"
 
 cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -55,11 +68,11 @@ cat > "$PLIST" <<EOF
   <string>${PLIST_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${PY}</string>
-    <string>${DEST}/dymo_bridge.py</string>
+    <string>${PY_XML}</string>
+    <string>${SCRIPT_XML}</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>${DEST}</string>
+  <string>${DEST_XML}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
@@ -70,9 +83,9 @@ cat > "$PLIST" <<EOF
     <string>${PORT}</string>
   </dict>
   <key>StandardOutPath</key>
-  <string>${DEST}/dymo-bridge.launchd.out.log</string>
+  <string>${DEST_XML}/dymo-bridge.launchd.out.log</string>
   <key>StandardErrorPath</key>
-  <string>${DEST}/dymo-bridge.launchd.err.log</string>
+  <string>${DEST_XML}/dymo-bridge.launchd.err.log</string>
 </dict>
 </plist>
 EOF

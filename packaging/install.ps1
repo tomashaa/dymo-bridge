@@ -20,35 +20,45 @@ Write-Host "  SkyKeeper Print Helper — Windows install"
 Write-Host "============================================"
 Write-Host ""
 
-function Get-PythonExe {
-  foreach ($name in @("python", "py")) {
-    $cmd = Get-Command $name -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
+function Get-PythonCommand {
+  # Prefer real python.exe over the Windows Store stub / py launcher when possible
+  $python = Get-Command python -ErrorAction SilentlyContinue
+  if ($python -and $python.Source -notmatch 'WindowsApps\\python\.exe$') {
+    return @{ Exe = $python.Source; PrefixArgs = @() }
+  }
+  $py = Get-Command py -ErrorAction SilentlyContinue
+  if ($py) {
+    return @{ Exe = $py.Source; PrefixArgs = @('-3') }
+  }
+  if ($python) {
+    return @{ Exe = $python.Source; PrefixArgs = @() }
   }
   return $null
 }
 
-$Python = Get-PythonExe
-if (-not $Python) {
+$PyInfo = Get-PythonCommand
+if (-not $PyInfo) {
   Write-Host "Python 3 was not found on PATH."
   Write-Host "Install from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then re-run."
   exit 1
 }
-Write-Host "==> Using Python: $Python"
 
-Write-Host "==> Installing Python packages (pillow, qrcode, pywin32)…"
-& $Python -m pip install --user --upgrade pip | Out-Null
-& $Python -m pip install --user "pillow" "qrcode[pil]" "pywin32" "cryptography"
+$Python = $PyInfo.Exe
+$PyArgs = $PyInfo.PrefixArgs
+Write-Host "==> Using Python: $Python $($PyArgs -join ' ')"
+
+Write-Host "==> Installing Python packages (pillow, qrcode, pywin32, cryptography)…"
+& $Python @PyArgs -m pip install --user --upgrade pip | Out-Null
+& $Python @PyArgs -m pip install --user "pillow" "qrcode[pil]" "pywin32" "cryptography"
 if ($LASTEXITCODE -ne 0) {
   Write-Host "pip install failed."
   exit 1
 }
 
-try {
-  & $Python -c "import win32print, win32ui; print('pywin32 ok')"
-} catch {
+& $Python @PyArgs -c "import win32print, win32ui; print('pywin32 ok')"
+if ($LASTEXITCODE -ne 0) {
   Write-Host "pywin32 import check failed — trying pywin32_postinstall…"
-  & $Python -m pywin32_postinstall -install
+  & $Python @PyArgs -m pywin32_postinstall -install
 }
 
 Write-Host "==> Copying files → $Dest"
@@ -58,15 +68,21 @@ if (Test-Path (Join-Path $Root "test-print.py")) {
   Copy-Item -Force (Join-Path $Root "test-print.py") (Join-Path $Dest "test-print.py")
 }
 
-$PythonW = $Python -replace 'python\.exe$', 'pythonw.exe'
-if (-not (Test-Path $PythonW)) { $PythonW = $Python }
+# Prefer pythonw for windowless run when we have a real python.exe
+$RunExe = $Python
+$RunPrefix = ($PyArgs -join ' ')
+if ($Python -match 'python\.exe$' -and -not $PyArgs) {
+  $candidate = $Python -replace 'python\.exe$', 'pythonw.exe'
+  if (Test-Path $candidate) { $RunExe = $candidate }
+}
 
 $Wrapper = Join-Path $Dest "run-helper.cmd"
+$exeLine = if ($RunPrefix) { "`"$RunExe`" $RunPrefix `"%~dp0dymo_bridge.py`"" } else { "`"$RunExe`" `"%~dp0dymo_bridge.py`"" }
 @"
 @echo off
 set DYMO_BRIDGE_PORT=$Port
 cd /d "%~dp0"
-"$PythonW" "%~dp0dymo_bridge.py"
+$exeLine
 "@ | Set-Content -Encoding ASCII $Wrapper
 
 Write-Host "==> Registering logon task '$TaskName'…"
