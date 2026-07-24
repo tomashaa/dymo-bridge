@@ -1,0 +1,12 @@
+[Unit]
+Description=dymo-bridge (Linux DYMO Connect Web Service clone for SkyKeeper)
+After=cups.service network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/share/dymo-bridge/dymo_bridge.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

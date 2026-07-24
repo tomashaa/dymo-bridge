@@ -1,0 +1,6 @@
+*.pem
+__pycache__/
+venv/
+*.log
+dymo-*.png
+.DS_Store
