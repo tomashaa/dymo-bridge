@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-dymo-bridge — SkyKeeper Print Helper (Linux).
+dymo-bridge — SkyKeeper Print Helper (Linux + Windows).
 
 Emulates the DYMO Connect Web Service API on a dedicated port so SkyKeeper can
 prefer this helper and fall back to official DYMO Connect (41951–41960):
 
     GET  /DYMO/DLS/Version                   -> "SkyKeeper-Print-Helper/…"
     GET  /DYMO/DLS/Printing/StatusConnected  -> "true"
-    GET  /DYMO/DLS/Printing/GetPrinters      -> <Printers> XML built from CUPS
-    POST /DYMO/DLS/Printing/PrintLabel[2]    -> renders labelXml and prints via CUPS
+    GET  /DYMO/DLS/Printing/GetPrinters      -> <Printers> XML (CUPS or Windows)
+    POST /DYMO/DLS/Printing/PrintLabel[2]    -> render labelXml → print
 
+Linux: CUPS (python3-cups). Windows: win32print/GDI (pywin32).
 Default listen: https://127.0.0.1:41971  (override with DYMO_BRIDGE_PORT)
 
 It renders both DYMO XML dialects the app emits:
@@ -28,6 +29,7 @@ import html
 import io
 import os
 import re
+import shutil
 import ssl
 import subprocess
 import sys
@@ -53,7 +55,7 @@ except ImportError:
 HOST = "127.0.0.1"
 # Dedicated SkyKeeper port — leave 41951–41960 for official DYMO Connect fallback.
 PORT = int(os.environ.get("DYMO_BRIDGE_PORT", "41971"))
-SERVICE_VERSION = "SkyKeeper-Print-Helper/1.0"
+SERVICE_VERSION = "SkyKeeper-Print-Helper/1.1"
 DPI = 300
 TWIPS_PER_INCH = 1440.0
 MM_PER_INCH = 25.4
@@ -83,26 +85,31 @@ PAPER_TO_CUPS_MEDIA = {
     "30270 Continuous": "w296h452",      # ~4 x 6 in (4XL)
 }
 
-# Arial/Helvetica -> Liberation Sans (metric compatible); Courier -> Liberation Mono.
+IS_WINDOWS = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
+
+# Arial/Helvetica -> Liberation Sans (Linux) or Arial (Windows); Courier -> mono.
+_WIN_FONTS = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
 FONT_DIRS = [
     "/usr/share/fonts/truetype/liberation",
     "/usr/share/fonts/truetype/dejavu",
+    _WIN_FONTS,
 ]
 FONT_MAP = {
     "sans": {
-        (False, False): "LiberationSans-Regular.ttf",
-        (True, False): "LiberationSans-Bold.ttf",
-        (False, True): "LiberationSans-Italic.ttf",
-        (True, True): "LiberationSans-BoldItalic.ttf",
+        (False, False): ["LiberationSans-Regular.ttf", "arial.ttf", "Arial.ttf", "DejaVuSans.ttf"],
+        (True, False): ["LiberationSans-Bold.ttf", "arialbd.ttf", "Arialbd.ttf", "DejaVuSans-Bold.ttf"],
+        (False, True): ["LiberationSans-Italic.ttf", "ariali.ttf", "Ariali.ttf", "DejaVuSans-Oblique.ttf"],
+        (True, True): ["LiberationSans-BoldItalic.ttf", "arialbi.ttf", "Arialbi.ttf", "DejaVuSans-BoldOblique.ttf"],
     },
     "mono": {
-        (False, False): "LiberationMono-Regular.ttf",
-        (True, False): "LiberationMono-Bold.ttf",
-        (False, True): "LiberationMono-Italic.ttf",
-        (True, True): "LiberationMono-BoldItalic.ttf",
+        (False, False): ["LiberationMono-Regular.ttf", "cour.ttf", "cour.ttf", "DejaVuSansMono.ttf"],
+        (True, False): ["LiberationMono-Bold.ttf", "courbd.ttf", "DejaVuSansMono-Bold.ttf"],
+        (False, True): ["LiberationMono-Italic.ttf", "couri.ttf", "DejaVuSansMono-Oblique.ttf"],
+        (True, True): ["LiberationMono-BoldItalic.ttf", "courbi.ttf", "DejaVuSansMono-BoldOblique.ttf"],
     },
 }
-FONT_FALLBACK = "DejaVuSans.ttf"
+FONT_FALLBACKS = ["DejaVuSans.ttf", "arial.ttf", "Arial.ttf"]
 
 _font_cache = {}
 
@@ -137,24 +144,28 @@ def pt_to_px(pt):
 # Fonts
 # --------------------------------------------------------------------------- #
 
-def _find_font_file(filename):
-    for d in FONT_DIRS:
-        p = os.path.join(d, filename)
-        if os.path.exists(p):
-            return p
+def _find_font_file(filenames):
+    names = filenames if isinstance(filenames, (list, tuple)) else [filenames]
+    for filename in names:
+        for d in FONT_DIRS:
+            if not d:
+                continue
+            p = os.path.join(d, filename)
+            if os.path.exists(p):
+                return p
     return None
 
 
 def resolve_font(family, size_pt, bold=False, italic=False):
     fam = (family or "").lower()
     kind = "mono" if ("courier" in fam or "mono" in fam or "consol" in fam) else "sans"
-    filename = FONT_MAP[kind].get((bold, italic)) or FONT_MAP[kind][(False, False)]
-    path = _find_font_file(filename) or _find_font_file(FONT_FALLBACK)
+    candidates = FONT_MAP[kind].get((bold, italic)) or FONT_MAP[kind][(False, False)]
+    path = _find_font_file(candidates) or _find_font_file(FONT_FALLBACKS)
     px = pt_to_px(size_pt)
     key = (path, px)
     if key not in _font_cache:
         try:
-            _font_cache[key] = ImageFont.truetype(path, px)
+            _font_cache[key] = ImageFont.truetype(path, px) if path else ImageFont.load_default()
         except Exception:
             _font_cache[key] = ImageFont.load_default()
     return _font_cache[key]
@@ -418,14 +429,19 @@ def render_label(label_xml):
 
 
 # --------------------------------------------------------------------------- #
-# CUPS
+# Printer backends (Linux CUPS / Windows win32print)
 # --------------------------------------------------------------------------- #
 
 def _norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
-def list_dymo_printers():
+def _is_dymo_blob(text):
+    t = (text or "").lower()
+    return "dymo" in t or "labelwriter" in t
+
+
+def list_dymo_printers_cups():
     """Returns list of dicts: {queue, name, model, twinturbo}."""
     result = []
     if cups is None:
@@ -439,7 +455,7 @@ def list_dymo_printers():
     for name, attrs in printers.items():
         uri = (attrs.get("device-uri") or "").lower()
         model = attrs.get("printer-make-and-model", "") or ""
-        if "dymo" in uri or "dymo" in model.lower() or "labelwriter" in model.lower():
+        if _is_dymo_blob(uri) or _is_dymo_blob(model) or _is_dymo_blob(name):
             result.append({
                 "queue": name,
                 "name": name,
@@ -450,8 +466,43 @@ def list_dymo_printers():
     return result
 
 
+def list_dymo_printers_win():
+    """Enumerate Windows printers that look like DYMO LabelWriters."""
+    result = []
+    try:
+        import win32print  # type: ignore
+    except ImportError:
+        log("pywin32 not installed — cannot list Windows printers (pip install pywin32)")
+        return result
+    flags = win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS
+    try:
+        printers = win32print.EnumPrinters(flags, None, 2)
+    except Exception as e:
+        log(f"EnumPrinters failed: {e}")
+        return result
+    for p in printers:
+        name = p.get("pPrinterName") or ""
+        driver = p.get("pDriverName") or ""
+        blob = f"{name} {driver}"
+        if not _is_dymo_blob(blob):
+            continue
+        result.append({
+            "queue": name,
+            "name": name,
+            "model": driver or name,
+            "twinturbo": ("twin" in blob.lower() or "duo" in blob.lower()),
+        })
+    return result
+
+
+def list_dymo_printers():
+    if IS_WINDOWS:
+        return list_dymo_printers_win()
+    return list_dymo_printers_cups()
+
+
 def match_queue(printer_name):
-    """Fuzzy-match the DYMO printerName the app sends to a real CUPS queue."""
+    """Fuzzy-match the DYMO printerName the app sends to a real OS printer/queue."""
     printers = list_dymo_printers()
     if not printers:
         return None
@@ -485,12 +536,16 @@ def parse_paper_name(label_xml):
     return m.group(1).strip() if m else ""
 
 
-def print_image(queue, img, copies=1, paper_name=""):
+def _orient_for_labelwriter(img):
     # LabelWriter feeds along the long edge; raster width = across print head (short side).
-    # SkyKeeper DieCutLabel landscape canvases are long×short — rotate before CUPS.
+    # SkyKeeper DieCutLabel landscape canvases are long×short — rotate before print.
     if img.width > img.height:
-        img = img.transpose(Image.ROTATE_270)
+        return img.transpose(Image.ROTATE_270)
+    return img
 
+
+def print_image_cups(queue, img, copies=1, paper_name=""):
+    img = _orient_for_labelwriter(img)
     fd, path = tempfile.mkstemp(suffix=".png", prefix="dymo-", dir=BASE_DIR)
     os.close(fd)
     img.convert("L").save(path, "PNG", dpi=(DPI, DPI))
@@ -508,11 +563,10 @@ def print_image(queue, img, copies=1, paper_name=""):
             job = conn.printFile(queue, path, title, options)
             log(f"  submitted CUPS job {job} to '{queue}' ({copies} copy/ies) media={media} paper='{paper_name}'")
             return True
-        else:
-            cmd = ["lp", "-d", queue, "-n", str(copies),
-                   "-o", "fit-to-page", "-o", f"media={media}", path]
-            subprocess.run(cmd, check=True)
-            return True
+        cmd = ["lp", "-d", queue, "-n", str(copies),
+               "-o", "fit-to-page", "-o", f"media={media}", path]
+        subprocess.run(cmd, check=True)
+        return True
     except Exception as e:
         log(f"  print failed: {e}")
         return False
@@ -521,6 +575,51 @@ def print_image(queue, img, copies=1, paper_name=""):
             os.remove(path)
         except OSError:
             pass
+
+
+def print_image_win(printer_name, img, copies=1, paper_name=""):
+    """Print rendered label via Windows GDI (pywin32)."""
+    try:
+        import win32ui  # type: ignore
+        from PIL import ImageWin
+    except ImportError as e:
+        log(f"  Windows print deps missing: {e} (pip install pywin32 pillow)")
+        return False
+
+    HORZRES, VERTRES = 8, 10
+    img = _orient_for_labelwriter(img).convert("RGB")
+    n = max(1, int(copies or 1))
+    try:
+        for i in range(n):
+            hdc = win32ui.CreateDC()
+            hdc.CreatePrinterDC(printer_name)
+            printable = hdc.GetDeviceCaps(HORZRES), hdc.GetDeviceCaps(VERTRES)
+            if printable[0] <= 0 or printable[1] <= 0:
+                raise RuntimeError(f"invalid printable area from '{printer_name}'")
+            ratios = [printable[0] / img.size[0], printable[1] / img.size[1]]
+            scale = min(ratios)
+            scaled_w = max(1, int(img.size[0] * scale))
+            scaled_h = max(1, int(img.size[1] * scale))
+            x1 = max(0, (printable[0] - scaled_w) // 2)
+            y1 = max(0, (printable[1] - scaled_h) // 2)
+            hdc.StartDoc("SkyKeeper Label")
+            hdc.StartPage()
+            dib = ImageWin.Dib(img)
+            dib.draw(hdc.GetHandleOutput(), (x1, y1, x1 + scaled_w, y1 + scaled_h))
+            hdc.EndPage()
+            hdc.EndDoc()
+            hdc.DeleteDC()
+            log(f"  Windows print page {i + 1}/{n} → '{printer_name}' paper='{paper_name}'")
+        return True
+    except Exception as e:
+        log(f"  Windows print failed: {e}")
+        return False
+
+
+def print_image(queue, img, copies=1, paper_name=""):
+    if IS_WINDOWS:
+        return print_image_win(queue, img, copies=copies, paper_name=paper_name)
+    return print_image_cups(queue, img, copies=copies, paper_name=paper_name)
 
 
 def parse_copies(print_params_xml):
@@ -550,17 +649,71 @@ def build_printers_xml():
 # TLS
 # --------------------------------------------------------------------------- #
 
-def ensure_cert():
-    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
-        return
-    log("generating self-signed certificate for 127.0.0.1 / localhost ...")
+def _ensure_cert_openssl():
     subprocess.run([
         "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
         "-keyout", KEY_FILE, "-out", CERT_FILE, "-days", "3650",
         "-subj", "/CN=127.0.0.1",
         "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost,IP:::1",
     ], check=True)
-    os.chmod(KEY_FILE, 0o600)
+
+
+def _ensure_cert_cryptography():
+    """Fallback when openssl CLI is missing (common on Windows)."""
+    import datetime as dt
+    import ipaddress
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+    now = dt.datetime.now(dt.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(minutes=1))
+        .not_valid_after(now + dt.timedelta(days=3650))
+        .add_extension(
+            x509.SubjectAlternativeName([
+                x509.IPAddress(ipaddress.IPv4Address("127.0.0.1")),
+                x509.DNSName("localhost"),
+                x509.IPAddress(ipaddress.IPv6Address("::1")),
+            ]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256())
+    )
+    with open(KEY_FILE, "wb") as fh:
+        fh.write(key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        ))
+    with open(CERT_FILE, "wb") as fh:
+        fh.write(cert.public_bytes(serialization.Encoding.PEM))
+
+
+def ensure_cert():
+    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+        return
+    log("generating self-signed certificate for 127.0.0.1 / localhost ...")
+    try:
+        if shutil.which("openssl"):
+            _ensure_cert_openssl()
+        else:
+            raise FileNotFoundError("openssl not on PATH")
+    except Exception as e:
+        log(f"openssl cert generation failed ({e}); trying cryptography…")
+        _ensure_cert_cryptography()
+    try:
+        os.chmod(KEY_FILE, 0o600)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -570,7 +723,7 @@ def ensure_cert():
 STATUS_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <title>SkyKeeper Print Helper</title></head><body style="font-family:sans-serif;max-width:40em;margin:3em auto">
 <h2>SkyKeeper Print Helper is running</h2>
-<p>Local label print service for SkyKeeper (port {port}). Official DYMO Connect can still run on 41951 as fallback.</p>
+<p>Local label print service for SkyKeeper (port {port}, {platform}). Official DYMO Connect can still run on 41951 as fallback.</p>
 <p>If you reached this page, the self-signed certificate is trusted for this browser — label printing from the app should work.</p>
 <p>Version: <b>{version}</b></p>
 <p>Printers detected: <b>{printers}</b></p>
@@ -614,11 +767,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(SERVICE_VERSION)
         elif path in ("", "/"):
             names = ", ".join(p["name"] for p in list_dymo_printers()) or "none"
+            platform = "Windows" if IS_WINDOWS else ("Linux" if IS_LINUX else sys.platform)
             self._send(
                 STATUS_PAGE.format(
                     printers=html.escape(names),
                     port=PORT,
                     version=html.escape(SERVICE_VERSION),
+                    platform=html.escape(platform),
                 ),
                 ctype="text/html; charset=utf-8",
             )
