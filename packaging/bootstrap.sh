@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# SkyKeeper DYMO Bridge — one-command installer for Linux (Pop!_OS / Ubuntu / Cosmic).
+# SkyKeeper Print Helper — one-command installer for Linux and macOS.
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/tomashaa/dymo-bridge/main/packaging/bootstrap.sh | bash
-# Or download this file, then:  bash install-skykeeper-dymo-bridge.sh
+# Windows: use packaging/bootstrap.ps1 instead.
 set -euo pipefail
 
 REPO_TAR="https://github.com/tomashaa/dymo-bridge/archive/refs/heads/main.tar.gz"
@@ -10,13 +10,25 @@ TMP="$(mktemp -d)"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
 
+OS="$(uname -s)"
+case "$OS" in
+  Linux)  TITLE="Linux"; INSTALLER="install.sh" ;;
+  Darwin) TITLE="macOS"; INSTALLER="install-mac.sh" ;;
+  *)
+    echo "Unsupported OS: $OS"
+    echo "  Linux/macOS: this script"
+    echo "  Windows:     irm …/bootstrap.ps1 | iex"
+    exit 1
+    ;;
+esac
+
 echo ""
 echo "============================================"
-echo "  SkyKeeper DYMO Bridge — Linux installer"
+echo "  SkyKeeper Print Helper — ${TITLE} installer"
 echo "============================================"
 echo ""
-echo "This installs a small local service so SkyKeeper"
-echo "can print labels (same as DYMO Connect on Windows)."
+echo "Installs a local service on https://127.0.0.1:41971"
+echo "so SkyKeeper can print labels (DYMO Connect remains fallback)."
 echo ""
 
 need_cmd() {
@@ -35,13 +47,13 @@ echo "==> Downloading dymo-bridge…"
 curl -fsSL "$REPO_TAR" -o "$TMP/dymo-bridge.tar.gz"
 tar -xzf "$TMP/dymo-bridge.tar.gz" -C "$TMP"
 SRC="$(find "$TMP" -maxdepth 1 -type d -name 'dymo-bridge-*' | head -1)"
-if [[ -z "$SRC" || ! -f "$SRC/packaging/install.sh" ]]; then
-  echo "Download failed — could not find install.sh in the archive."
+if [[ -z "$SRC" || ! -f "$SRC/packaging/${INSTALLER}" ]]; then
+  echo "Download failed — could not find packaging/${INSTALLER} in the archive."
   exit 1
 fi
 
-echo "==> Running install…"
-bash "$SRC/packaging/install.sh"
+echo "==> Running ${INSTALLER}…"
+bash "$SRC/packaging/${INSTALLER}"
 
 echo ""
 echo "============================================"

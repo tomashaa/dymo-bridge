@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-dymo-bridge — SkyKeeper Print Helper (Linux + Windows).
+dymo-bridge — SkyKeeper Print Helper (Linux + Windows + macOS).
 
 Emulates the DYMO Connect Web Service API on a dedicated port so SkyKeeper can
 prefer this helper and fall back to official DYMO Connect (41951–41960):
 
     GET  /DYMO/DLS/Version                   -> "SkyKeeper-Print-Helper/…"
     GET  /DYMO/DLS/Printing/StatusConnected  -> "true"
-    GET  /DYMO/DLS/Printing/GetPrinters      -> <Printers> XML (CUPS or Windows)
+    GET  /DYMO/DLS/Printing/GetPrinters      -> <Printers> XML (CUPS / lpstat / Windows)
     POST /DYMO/DLS/Printing/PrintLabel[2]    -> render labelXml → print
 
-Linux: CUPS (python3-cups). Windows: win32print/GDI (pywin32).
+Linux/macOS: CUPS via pycups or lp/lpstat. Windows: win32print/GDI (pywin32).
 Default listen: https://127.0.0.1:41971  (override with DYMO_BRIDGE_PORT)
 
 It renders both DYMO XML dialects the app emits:
@@ -55,7 +55,7 @@ except ImportError:
 HOST = "127.0.0.1"
 # Dedicated SkyKeeper port — leave 41951–41960 for official DYMO Connect fallback.
 PORT = int(os.environ.get("DYMO_BRIDGE_PORT", "41971"))
-SERVICE_VERSION = "SkyKeeper-Print-Helper/1.1"
+SERVICE_VERSION = "SkyKeeper-Print-Helper/1.2"
 DPI = 300
 TWIPS_PER_INCH = 1440.0
 MM_PER_INCH = 25.4
@@ -87,13 +87,18 @@ PAPER_TO_CUPS_MEDIA = {
 
 IS_WINDOWS = sys.platform == "win32"
 IS_LINUX = sys.platform.startswith("linux")
+IS_MAC = sys.platform == "darwin"
 
-# Arial/Helvetica -> Liberation Sans (Linux) or Arial (Windows); Courier -> mono.
+# Arial/Helvetica -> Liberation Sans (Linux) or Arial (Windows/macOS); Courier -> mono.
 _WIN_FONTS = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")
 FONT_DIRS = [
     "/usr/share/fonts/truetype/liberation",
     "/usr/share/fonts/truetype/dejavu",
     _WIN_FONTS,
+    "/System/Library/Fonts/Supplemental",
+    "/System/Library/Fonts",
+    "/Library/Fonts",
+    os.path.expanduser("~/Library/Fonts"),
 ]
 FONT_MAP = {
     "sans": {
@@ -466,6 +471,43 @@ def list_dymo_printers_cups():
     return result
 
 
+def list_dymo_printers_lpstat():
+    """CUPS via lpstat — works on macOS and Linux without python3-cups."""
+    result = []
+    try:
+        out = subprocess.check_output(
+            ["lpstat", "-a"], text=True, stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        log(f"lpstat -a failed: {e}")
+        return result
+    for line in out.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        name = parts[0]
+        uri = ""
+        try:
+            vout = subprocess.check_output(
+                ["lpstat", "-v", name], text=True, stderr=subprocess.DEVNULL,
+            )
+            # "device for Name: usb://DYMO/..."
+            if ":" in vout:
+                uri = vout.split(":", 1)[1].strip()
+        except Exception:
+            pass
+        blob = f"{name} {uri}"
+        if not _is_dymo_blob(blob):
+            continue
+        result.append({
+            "queue": name,
+            "name": name,
+            "model": uri or name,
+            "twinturbo": ("twin" in blob.lower() or "duo" in blob.lower()),
+        })
+    return result
+
+
 def list_dymo_printers_win():
     """Enumerate Windows printers that look like DYMO LabelWriters."""
     result = []
@@ -498,7 +540,10 @@ def list_dymo_printers_win():
 def list_dymo_printers():
     if IS_WINDOWS:
         return list_dymo_printers_win()
-    return list_dymo_printers_cups()
+    printers = list_dymo_printers_cups()
+    if printers:
+        return printers
+    return list_dymo_printers_lpstat()
 
 
 def match_queue(printer_name):
@@ -767,7 +812,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(SERVICE_VERSION)
         elif path in ("", "/"):
             names = ", ".join(p["name"] for p in list_dymo_printers()) or "none"
-            platform = "Windows" if IS_WINDOWS else ("Linux" if IS_LINUX else sys.platform)
+            platform = (
+                "Windows" if IS_WINDOWS
+                else "macOS" if IS_MAC
+                else "Linux" if IS_LINUX
+                else sys.platform
+            )
             self._send(
                 STATUS_PAGE.format(
                     printers=html.escape(names),

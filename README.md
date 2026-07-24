@@ -7,53 +7,57 @@ Local label-print helper for [SkyKeeper](https://skykeeper.aero). Speaks the sam
 | **SkyKeeper Print Helper** (this repo) | `41971` | Preferred by SkyKeeper |
 | Official DYMO Connect | `41951`–`41960` | Automatic fallback |
 
-| OS | Status | Backend |
-|----|--------|---------|
-| **Linux** (Pop!_OS / Cosmic / Ubuntu) | Supported | CUPS |
-| **Windows** | Prototype | win32print / GDI (`pywin32`) |
-| **macOS** | Planned | CUPS / `lp` |
+| OS | Status | Backend | Autostart |
+|----|--------|---------|-----------|
+| **Linux** | Supported | CUPS / `lp` | `systemd --user` |
+| **macOS** | Supported | CUPS / `lpstat`+`lp` | LaunchAgent |
+| **Windows** | Prototype | win32print / GDI | Scheduled Task |
 
 ---
 
-## Linux — easy install
+## Linux & macOS — easy install
+
+Same one-liner (detects OS):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tomashaa/dymo-bridge/main/packaging/bootstrap.sh | bash
 ```
 
-Then open https://127.0.0.1:41971/ and trust the certificate → SkyKeeper **Settings → Printers → Refresh**.
+Then:
+
+1. Open https://127.0.0.1:41971/ and **trust** the certificate  
+2. SkyKeeper → **Settings → Printers → Refresh** → **SkyKeeper Print Helper**
+
+### Manual
+
+```bash
+# Linux
+bash packaging/install.sh
+
+# macOS
+bash packaging/install-mac.sh
+```
 
 ---
 
 ## Windows — prototype install
 
 1. Install [Python 3](https://www.python.org/downloads/) (tick **Add python.exe to PATH**)
-2. Install DYMO printer drivers (Windows printer list must show your LabelWriter)
-3. Open **PowerShell** and run:
+2. DYMO printer drivers installed
+3. PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/tomashaa/dymo-bridge/main/packaging/bootstrap.ps1 | iex
 ```
 
-4. Open https://127.0.0.1:41971/ and trust the certificate  
-5. SkyKeeper → **Settings → Printers → Refresh** → status **SkyKeeper Print Helper**
-
-### Manual (from a clone)
-
-```powershell
-cd dymo-bridge
-powershell -ExecutionPolicy Bypass -File packaging\install.ps1
-```
-
-The installer copies files to `%LOCALAPPDATA%\SkyKeeper\dymo-bridge`, registers a logon scheduled task, and starts the helper.
-
 ---
 
 ## Requirements
 
-- DYMO LabelWriter visible to the OS (CUPS on Linux, Windows printer queue on Windows)
-- Linux: `python3-pil`, `python3-qrcode`, `python3-cups`
-- Windows: `pillow`, `qrcode`, `pywin32` (installed by the script)
+- DYMO LabelWriter visible to the OS
+- Linux: apt/dnf packages via `install.sh`
+- macOS: `python3` + `pip install pillow qrcode cryptography` (done by installer)
+- Windows: `pillow`, `qrcode`, `pywin32`, `cryptography`
 
 Override port: `DYMO_BRIDGE_PORT=41971` (default).
 
@@ -66,14 +70,24 @@ systemctl --user status dymo-bridge
 systemctl --user restart dymo-bridge
 ```
 
+**macOS**
+
+```bash
+launchctl print "gui/$(id -u)/com.skykeeper.print-helper"
+launchctl kickstart -k "gui/$(id -u)/com.skykeeper.print-helper"
+# Remove autostart:
+launchctl bootout "gui/$(id -u)/com.skykeeper.print-helper"
+rm ~/Library/LaunchAgents/com.skykeeper.print-helper.plist
+# Files: ~/Library/Application Support/SkyKeeper/dymo-bridge/
+```
+
 **Windows**
 
 ```powershell
 Get-ScheduledTask -TaskName SkyKeeperPrintHelper
-Unregister-ScheduledTask -TaskName SkyKeeperPrintHelper -Confirm:$false   # uninstall autostart
-# Log: %LOCALAPPDATA%\SkyKeeper\dymo-bridge\dymo-bridge.log
+Unregister-ScheduledTask -TaskName SkyKeeperPrintHelper -Confirm:$false
 ```
 
 ## SkyKeeper UI
 
-**Settings → Printers** — platform-specific install card + status badge (Print Helper vs DYMO Connect).
+**Settings → Printers** — OS-highlighted install cards + status badge (Print Helper vs DYMO Connect).
