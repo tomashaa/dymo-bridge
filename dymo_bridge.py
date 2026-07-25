@@ -230,42 +230,70 @@ def draw_text_object(img, draw, obj, box):
     if not runs:
         return
 
-    text = "".join(r["text"] for r in runs)
-    spec = runs[0]
+    # Split StyledText Elements into lines; keep each Element's font (bold vs regular).
+    lines = [[]]
+    for r in runs:
+        parts = (r["text"] if r["text"] is not None else "").split("\n")
+        for i, part in enumerate(parts):
+            if i > 0:
+                lines.append([])
+            lines[-1].append({**r, "text": part})
+    if not lines:
+        return
+
     halign = _t(obj, "HorizontalAlignment", "Left")
     valign = _t(obj, "VerticalAlignment", "Top")
     fit = _t(obj, "TextFitMode", "None")
 
-    size = spec["size"]
-    font = resolve_font(spec["family"], size, spec["bold"], spec["italic"])
-    if fit in ("ShrinkToFit", "AlwaysFit"):
-        # shrink font until the whole block fits the box
-        while size > 3:
-            font = resolve_font(spec["family"], size, spec["bold"], spec["italic"])
-            tw, th = text_size(draw, text, font)
-            if tw <= w and th <= h:
-                break
-            size -= 0.5
+    def measure_lines(scale):
+        total_h = 0
+        max_w = 0
+        prepared = []
+        for segs in lines:
+            row = []
+            row_h = 1
+            row_w = 0
+            for seg in segs:
+                size = max(3.0, float(seg["size"]) * scale)
+                font = resolve_font(seg["family"], size, seg["bold"], seg["italic"])
+                sample = seg["text"] if seg["text"] else " "
+                bbox = draw.textbbox((0, 0), sample, font=font)
+                sw = bbox[2] - bbox[0]
+                sh = max(1, bbox[3] - bbox[1])
+                row.append((seg["text"], font, seg["color"], sw, sh))
+                row_w += sw
+                row_h = max(row_h, sh)
+            prepared.append(row)
+            max_w = max(max_w, row_w)
+            total_h += int(row_h * 1.25) or 1
+        return prepared, max_w, total_h
 
-    lines = text.split("\n")
-    line_h = int(font.size * 1.25) or 1
-    total_h = line_h * len(lines)
+    scale = 1.0
+    prepared, max_w, total_h = measure_lines(scale)
+    if fit in ("ShrinkToFit", "AlwaysFit"):
+        while scale > 0.35 and (max_w > w or total_h > h):
+            scale -= 0.05
+            prepared, max_w, total_h = measure_lines(scale)
+
     cy = y
     if valign == "Middle":
         cy = y + max(0, (h - total_h) // 2)
     elif valign == "Bottom":
         cy = y + max(0, h - total_h)
 
-    for ln in lines:
-        bbox = draw.textbbox((0, 0), ln if ln else " ", font=font)
-        lw = bbox[2] - bbox[0]
+    for row in prepared:
+        row_w = sum(sw for _, _, _, sw, _ in row) if row else 0
+        row_h = max((sh for _, _, _, _, sh in row), default=1)
         cx = x
         if halign == "Center":
-            cx = x + max(0, (w - lw) // 2)
+            cx = x + max(0, (w - row_w) // 2)
         elif halign == "Right":
-            cx = x + max(0, w - lw)
-        draw.text((cx, cy), ln, fill=spec["color"], font=font)
-        cy += line_h
+            cx = x + max(0, w - row_w)
+        for text, font, color, sw, _sh in row:
+            if text:
+                draw.text((cx, cy), text, fill=color, font=font)
+            cx += sw
+        cy += int(row_h * 1.25) or 1
 
 
 def draw_image_object(img, obj, box):
