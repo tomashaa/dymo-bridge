@@ -55,7 +55,9 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now dymo-bridge.service
+systemctl --user enable dymo-bridge.service
+# enable --now does NOT restart an already-running unit — force reload of new code
+systemctl --user restart dymo-bridge.service
 
 # Prefer Large Address (36x89mm) for LabelWriter 450 DUO Label queues if present
 if lpstat -a 2>/dev/null | grep -q 'LabelWriter-450-DUO-Label'; then
