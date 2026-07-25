@@ -421,10 +421,48 @@ def render_dialect_b(root):
     return img
 
 
+def extract_wysiwyg_preview_image(label_xml):
+    """
+    If the label is a SkyKeeper WYSIWYG job (single <ImageObject><Name>Preview</Name>),
+    decode that PNG and return it — do NOT re-layout text/QR from XML.
+    That keeps physical print identical to the on-screen preview.
+    """
+    try:
+        root = ET.fromstring(label_xml.strip().lstrip("\ufeff"))
+    except ET.ParseError:
+        return None
+    if root.tag not in ("DieCutLabel", "ContinuousLabel"):
+        return None
+    previews = []
+    for oi in root.findall(".//ObjectInfo"):
+        img_obj = oi.find("ImageObject")
+        if img_obj is None:
+            continue
+        if (_t(img_obj, "Name", "") or "").strip() != "Preview":
+            continue
+        b64 = (_t(img_obj, "Image", "") or "").strip()
+        if not b64:
+            continue
+        try:
+            raw = base64.b64decode(b64)
+            previews.append(Image.open(io.BytesIO(raw)).convert("RGB"))
+        except Exception as e:
+            log(f"  wysiwyg Preview decode failed: {e}")
+            return None
+    if len(previews) != 1:
+        return None
+    log(f"  wysiwyg Preview image {previews[0].size[0]}x{previews[0].size[1]} (skip XML re-layout)")
+    return previews[0]
+
+
 def render_label(label_xml):
     label_xml = label_xml.strip()
     if label_xml.startswith("﻿"):
         label_xml = label_xml.lstrip("﻿")
+    # Prefer exact preview raster when present (part-label WYSIWYG path).
+    wysiwyg = extract_wysiwyg_preview_image(label_xml)
+    if wysiwyg is not None:
+        return wysiwyg
     root = ET.fromstring(label_xml)
     if root.tag in ("DieCutLabel", "ContinuousLabel"):
         return render_dialect_a(root)
@@ -583,7 +621,7 @@ def parse_paper_name(label_xml):
 
 def _orient_for_labelwriter(img):
     # LabelWriter feeds along the long edge; raster width = across print head (short side).
-    # SkyKeeper DieCutLabel landscape canvases are long×short — rotate before print.
+    # Landscape canvases (long×short) must be rotated before the job hits the queue.
     if img.width > img.height:
         return img.transpose(Image.ROTATE_270)
     return img
@@ -596,10 +634,11 @@ def print_image_cups(queue, img, copies=1, paper_name=""):
     img.convert("L").save(path, "PNG", dpi=(DPI, DPI))
 
     media = PAPER_TO_CUPS_MEDIA.get(paper_name) or PAPER_TO_CUPS_MEDIA.get("30321 Large Address")
+    # Avoid fit-to-page letterboxing/stretch — WYSIWYG rasters are already stock-sized.
     options = {
-        "fit-to-page": "true",
         "copies": str(max(1, copies)),
         "media": media,
+        "scaling": "100",
     }
     title = "SkyKeeper Label"
     try:
@@ -609,7 +648,7 @@ def print_image_cups(queue, img, copies=1, paper_name=""):
             log(f"  submitted CUPS job {job} to '{queue}' ({copies} copy/ies) media={media} paper='{paper_name}'")
             return True
         cmd = ["lp", "-d", queue, "-n", str(copies),
-               "-o", "fit-to-page", "-o", f"media={media}", path]
+               "-o", "scaling=100", "-o", f"media={media}", path]
         subprocess.run(cmd, check=True)
         return True
     except Exception as e:
@@ -641,12 +680,13 @@ def print_image_win(printer_name, img, copies=1, paper_name=""):
             printable = hdc.GetDeviceCaps(HORZRES), hdc.GetDeviceCaps(VERTRES)
             if printable[0] <= 0 or printable[1] <= 0:
                 raise RuntimeError(f"invalid printable area from '{printer_name}'")
+            # Cover printable area (no empty bands). Slight crop beats letterboxing mismatch.
             ratios = [printable[0] / img.size[0], printable[1] / img.size[1]]
-            scale = min(ratios)
+            scale = max(ratios)
             scaled_w = max(1, int(img.size[0] * scale))
             scaled_h = max(1, int(img.size[1] * scale))
-            x1 = max(0, (printable[0] - scaled_w) // 2)
-            y1 = max(0, (printable[1] - scaled_h) // 2)
+            x1 = (printable[0] - scaled_w) // 2
+            y1 = (printable[1] - scaled_h) // 2
             hdc.StartDoc("SkyKeeper Label")
             hdc.StartPage()
             dib = ImageWin.Dib(img)
