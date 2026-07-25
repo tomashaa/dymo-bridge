@@ -421,6 +421,42 @@ def render_dialect_b(root):
     return img
 
 
+def _fit_uniform_to_size(img, width_px, height_px):
+    """Scale image uniformly into width×height with white padding (no stretch)."""
+    width_px = max(1, int(width_px))
+    height_px = max(1, int(height_px))
+    canvas = Image.new("RGB", (width_px, height_px), "white")
+    if img.width <= 0 or img.height <= 0:
+        return canvas
+    ratio = min(width_px / img.width, height_px / img.height)
+    nw = max(1, int(round(img.width * ratio)))
+    nh = max(1, int(round(img.height * ratio)))
+    resized = img.resize((nw, nh), Image.LANCZOS)
+    canvas.paste(resized, ((width_px - nw) // 2, (height_px - nh) // 2))
+    return canvas
+
+
+def normalize_wysiwyg_to_paper(img, paper_name, root_tag, orient):
+    """Pad/scale WYSIWYG raster to exact media pixels so CUPS won't stretch it."""
+    size_in = PAPER_SIZES_IN.get(paper_name)
+    if not size_in:
+        return img
+    long_in, short_in = size_in
+    if orient == "Portrait":
+        w_px = max(1, int(round(short_in * DPI)))
+        h_px = max(1, int(round(long_in * DPI)))
+    else:
+        w_px = max(1, int(round(long_in * DPI)))
+        h_px = max(1, int(round(short_in * DPI)))
+    if root_tag == "ContinuousLabel" and orient == "Portrait":
+        # Extra Large uses LabelLength ≈ 6.3" — keep 4×6 media box.
+        w_px = max(1, int(round(4.0 * DPI)))
+        h_px = max(1, int(round(6.0 * DPI)))
+    fitted = _fit_uniform_to_size(img, w_px, h_px)
+    log(f"  wysiwyg normalized {img.size[0]}x{img.size[1]} → {w_px}x{h_px} (uniform)")
+    return fitted
+
+
 def extract_wysiwyg_preview_image(label_xml):
     """
     If the label is a SkyKeeper WYSIWYG job (single <ImageObject><Name>Preview</Name>),
@@ -451,8 +487,11 @@ def extract_wysiwyg_preview_image(label_xml):
             return None
     if len(previews) != 1:
         return None
-    log(f"  wysiwyg Preview image {previews[0].size[0]}x{previews[0].size[1]} (skip XML re-layout)")
-    return previews[0]
+    img = previews[0]
+    paper = _t(root, "PaperName", "")
+    orient = _t(root, "PaperOrientation", "Landscape")
+    log(f"  wysiwyg Preview image {img.size[0]}x{img.size[1]} (skip XML re-layout)")
+    return normalize_wysiwyg_to_paper(img, paper, root.tag, orient)
 
 
 def render_label(label_xml):
@@ -680,13 +719,13 @@ def print_image_win(printer_name, img, copies=1, paper_name=""):
             printable = hdc.GetDeviceCaps(HORZRES), hdc.GetDeviceCaps(VERTRES)
             if printable[0] <= 0 or printable[1] <= 0:
                 raise RuntimeError(f"invalid printable area from '{printer_name}'")
-            # Cover printable area (no empty bands). Slight crop beats letterboxing mismatch.
+            # Uniform contain — never stretch/crop (distorted logos + clipped lines).
             ratios = [printable[0] / img.size[0], printable[1] / img.size[1]]
-            scale = max(ratios)
+            scale = min(ratios)
             scaled_w = max(1, int(img.size[0] * scale))
             scaled_h = max(1, int(img.size[1] * scale))
-            x1 = (printable[0] - scaled_w) // 2
-            y1 = (printable[1] - scaled_h) // 2
+            x1 = max(0, (printable[0] - scaled_w) // 2)
+            y1 = max(0, (printable[1] - scaled_h) // 2)
             hdc.StartDoc("SkyKeeper Label")
             hdc.StartPage()
             dib = ImageWin.Dib(img)
