@@ -91,3 +91,9 @@ Unregister-ScheduledTask -TaskName SkyKeeperPrintHelper -Confirm:$false
 ## SkyKeeper UI
 
 **Settings → Printers** — OS-highlighted install cards + status badge (Print Helper vs DYMO Connect).
+
+## Licensing terms
+
+The current application is licensed under **GPL-3.0-only**. Everyone may install and use it, including commercially. Selling copies or support is allowed, but distribution of covered derivatives must preserve GPL rights and provide the corresponding source; closed-source proprietary distribution of those derivatives is not allowed under this license.
+
+Copyright (c) 2026 Tomas Haaland for his original contributions. Third-party notices and dependency licenses are retained. See [LICENSE](LICENSE) for the full terms and [LICENSING.md](LICENSING.md) for scope, source distribution and earlier license permissions.
